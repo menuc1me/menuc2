@@ -41,7 +41,7 @@
 </head>
 <body>
 <div class="card">
-  <div style="font-size:38px"></div>
+  <div style="font-size:38px">☕</div>
   <h1 id="cafeName"></h1>
   <p class="sub">در حال پیدا کردن بهترین مسیر...</p>
   <div class="spin" id="spin"></div>
@@ -57,7 +57,7 @@
    ✏️ فقط این قسمت رو تغییر بده
    ===================================================== */
 
-// اسم کافه (بالای صفحه نشون داده میشه)
+// اسم کافه (اختیاری؛ فقط یه متنه و روی سرعت تأثیر نداره)
 var CAFE_NAME = "";
 
 // لینک‌ها: هر خط یک سایت
@@ -69,14 +69,11 @@ var SITES = [
 // مسیر سبک برای تست سرعت (اگه توی ورکر نساختی، "/" بذار)
 var PING_PATH = "/ping";
 
-// حداکثر زمان انتظار برای تست (میلی‌ثانیه)
-var TIMEOUT = 6000;
+// حداکثر زمان انتظار برای هر دور تست (میلی‌ثانیه)
+var TIMEOUT = 4000;
 
-// سایت برنده چند دقیقه یادش بمونه (۰ = خاموش)
-var CACHE_MINUTES = 10;
-
-// تست سایت ذخیره‌شده چقدر صبر کنه، بعدش دوباره مسابقه (میلی‌ثانیه)
-var CACHE_TIMEOUT = 2000;
+// اگه هیچ‌کدوم جواب نداد، چند بار دوباره امتحان کنه
+var MAX_ROUNDS = 5;
 
 // بعد از چند ثانیه دکمه‌های دستی نشون داده بشه
 var SHOW_MANUAL_AFTER = 4000;
@@ -93,7 +90,8 @@ var statusEl = document.getElementById("status");
 var linksEl = document.getElementById("links");
 var spinEl = document.getElementById("spin");
 var redirected = false;
-var CK = "menu_best_site";
+var running = false;
+var round = 0;
 
 function base(site) { return site.url.replace(/\/+$/, ""); }
 function fullUrl(site) { return base(site) + "/" + extra; }
@@ -112,26 +110,10 @@ function showManual() {
 }
 setTimeout(showManual, SHOW_MANUAL_AFTER);
 
-function getCache() {
-  if (!CACHE_MINUTES) return null;
-  try {
-    var o = JSON.parse(localStorage.getItem(CK) || "null");
-    if (o && Date.now() - o.t < CACHE_MINUTES * 60000) {
-      for (var i = 0; i < SITES.length; i++) if (SITES[i].url === o.u) return SITES[i];
-    }
-  } catch (e) {}
-  return null;
-}
-function setCache(site) {
-  if (!CACHE_MINUTES) return;
-  try { localStorage.setItem(CK, JSON.stringify({ u: site.url, t: Date.now() })); } catch (e) {}
-}
-
 // اولین سایتی که جواب بده سریع‌ترینه؛ همون لحظه میره
 function go(site) {
   if (redirected) return;
   redirected = true;
-  setCache(site);
   statusEl.textContent = "وصل شد ✓ " + site.name;
   location.replace(fullUrl(site));
 }
@@ -143,36 +125,57 @@ function fail() {
   showManual();
 }
 
-function probe(site, timeout, cb) {
+function probe(site, cb) {
   var ctrl = new AbortController();
-  var timer = setTimeout(function () { ctrl.abort(); }, timeout);
-  fetch(base(site) + PING_PATH + "?_t=" + Date.now(), {
+  var timer = setTimeout(function () { ctrl.abort(); }, TIMEOUT);
+  fetch(base(site) + PING_PATH + "?_t=" + Date.now() + Math.random().toString(36).slice(2, 6), {
     method: "GET",
     mode: "no-cors",
     cache: "no-store",
+    credentials: "omit",
     signal: ctrl.signal
   })
   .then(function () { clearTimeout(timer); cb(true); })
   .catch(function () { clearTimeout(timer); cb(false); });
 }
 
+// هر بار از صفر و بدون هیچ حافظه‌ای، همهٔ سایت‌ها رو همزمان تست می‌کنه
 function race() {
+  if (redirected || running) return;
+  running = true;
+  round++;
   var done = 0;
   SITES.forEach(function (site) {
-    probe(site, TIMEOUT, function (ok) {
+    probe(site, function (ok) {
+      if (redirected) return;
       done++;
-      if (ok) go(site);
-      else if (done === SITES.length) fail();
+      if (ok) { go(site); return; }
+      if (done === SITES.length) {
+        running = false;
+        if (round < MAX_ROUNDS) setTimeout(race, 1000);
+        else fail();
+      }
     });
   });
 }
 
-var cached = getCache();
-if (cached) {
-  probe(cached, CACHE_TIMEOUT, function (ok) { if (ok) go(cached); else race(); });
-} else {
+// اگه وسط کار اینترنت عوض شد (وای‌فای/دیتا/اپراتور)، از اول شروع کن
+function restart() {
+  if (redirected) return;
+  round = 0;
+  spinEl.style.display = "block";
+  statusEl.textContent = "در حال بررسی دوباره...";
   race();
 }
+window.addEventListener("online", restart);
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden && !redirected && !running) restart();
+});
+if (navigator.connection && navigator.connection.addEventListener) {
+  navigator.connection.addEventListener("change", restart);
+}
+
+race();
 </script>
 </body>
 </html>
