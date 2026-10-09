@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title>منو</title>
+<!-- اتصال از قبل گرم می‌شه. اگه آدرس‌ها رو عوض کردی، اینجا هم عوض کن -->
+<link rel="preconnect" href="https://www.menuc1.ir">
+<link rel="preconnect" href="https://menuc1.ir">
 <style>
   *{box-sizing:border-box}
   body{
@@ -57,26 +60,29 @@
    ✏️ فقط این قسمت رو تغییر بده
    ===================================================== */
 
-// اسم کافه (اختیاری؛ فقط یه متنه و روی سرعت تأثیر نداره)
+// اسم کافه (اختیاری، روی سرعت اثری نداره)
 var CAFE_NAME = "";
 
-// لینک‌ها: هر خط یک سایت
+// لینک‌ها
 var SITES = [
   { name: "همراه اول", url: "https://www.menuc1.ir" },
   { name: "ایرانسل",   url: "https://menuc1.ir" }
 ];
 
-// مسیر سبک برای تست سرعت (اگه توی ورکر نساختی، "/" بذار)
+// مسیر سبک برای تست (اگه توی ورکر نساختی، "/" بذار)
 var PING_PATH = "/ping";
 
-// حداکثر زمان انتظار برای هر دور تست (میلی‌ثانیه)
-var TIMEOUT = 4000;
+// هر سایت در هر دور چند پینگ همزمان بگیره
+var PARALLEL = 3;
 
-// اگه هیچ‌کدوم جواب نداد، چند بار دوباره امتحان کنه
-var MAX_ROUNDS = 5;
+// دورهای پینگ (میلی‌ثانیه بعد از شروع). اگه دور اول جواب نداد، دور بعد خودکار میاد
+var WAVES = [0, 1500, 3500];
 
-// بعد از چند ثانیه دکمه‌های دستی نشون داده بشه
-var SHOW_MANUAL_AFTER = 4000;
+// حداکثر انتظار هر پینگ (میلی‌ثانیه)
+var TIMEOUT = 5000;
+
+// بعد از چند میلی‌ثانیه دکمه‌های دستی نشون داده بشه
+var SHOW_MANUAL_AFTER = 3500;
 
 /* =====================================================
    ⛔ از اینجا به پایین نیازی به تغییر نیست
@@ -90,30 +96,30 @@ var statusEl = document.getElementById("status");
 var linksEl = document.getElementById("links");
 var spinEl = document.getElementById("spin");
 var redirected = false;
-var running = false;
-var round = 0;
+var gen = 0, ctrls = [], timers = [];
 
 function base(site) { return site.url.replace(/\/+$/, ""); }
 function fullUrl(site) { return base(site) + "/" + extra; }
 
-// دکمه‌های دستی
+// دکمه‌های دستی + تلاش دوباره
 SITES.forEach(function (site) {
   var a = document.createElement("a");
   a.href = fullUrl(site);
   a.textContent = site.name;
   linksEl.appendChild(a);
 });
+var retry = document.createElement("a");
+retry.href = "#";
+retry.textContent = "تلاش دوباره ↻";
+retry.onclick = function (e) { e.preventDefault(); start(); };
+linksEl.appendChild(retry);
 
-function showManual() {
-  if (redirected) return;
-  linksEl.style.display = "block";
-}
-setTimeout(showManual, SHOW_MANUAL_AFTER);
+function showManual() { if (!redirected) linksEl.style.display = "block"; }
 
-// اولین سایتی که جواب بده سریع‌ترینه؛ همون لحظه میره
 function go(site) {
   if (redirected) return;
   redirected = true;
+  stop();
   statusEl.textContent = "وصل شد ✓ " + site.name;
   location.replace(fullUrl(site));
 }
@@ -125,57 +131,67 @@ function fail() {
   showManual();
 }
 
-function probe(site, cb) {
+function stop() {
+  ctrls.forEach(function (c) { try { c.abort(); } catch (e) {} });
+  timers.forEach(clearTimeout);
+  ctrls = []; timers = [];
+}
+
+// یک پینگ سبک (HEAD) بدون دانلود بدنهٔ صفحه
+function ping(site, cb) {
   var ctrl = new AbortController();
-  var timer = setTimeout(function () { ctrl.abort(); }, TIMEOUT);
+  ctrls.push(ctrl);
+  var t = setTimeout(function () { ctrl.abort(); }, TIMEOUT);
   fetch(base(site) + PING_PATH + "?_t=" + Date.now() + Math.random().toString(36).slice(2, 6), {
-    method: "GET",
+    method: "HEAD",
     mode: "no-cors",
     cache: "no-store",
-    credentials: "omit",
     signal: ctrl.signal
   })
-  .then(function () { clearTimeout(timer); cb(true); })
-  .catch(function () { clearTimeout(timer); cb(false); });
+  .then(function () { clearTimeout(t); cb(true); })
+  .catch(function () { clearTimeout(t); cb(false); });
 }
 
-// هر بار از صفر و بدون هیچ حافظه‌ای، همهٔ سایت‌ها رو همزمان تست می‌کنه
-function race() {
-  if (redirected || running) return;
-  running = true;
-  round++;
-  var done = 0;
-  SITES.forEach(function (site) {
-    probe(site, function (ok) {
-      if (redirected) return;
-      done++;
-      if (ok) { go(site); return; }
-      if (done === SITES.length) {
-        running = false;
-        if (round < MAX_ROUNDS) setTimeout(race, 1000);
-        else fail();
+// هر بار که صدا زده بشه از صفر شروع می‌کنه (برای وقتی نت عوض می‌شه)
+function start() {
+  stop();
+  var g = ++gen;
+  var total = SITES.length * PARALLEL * WAVES.length, done = 0;
+  spinEl.style.display = "";
+  statusEl.textContent = "لطفاً صبر کن";
+
+  function wave() {
+    if (redirected || g !== gen) return;
+    SITES.forEach(function (site) {
+      for (var i = 0; i < PARALLEL; i++) {
+        ping(site, function (ok) {
+          if (g !== gen || redirected) return;
+          done++;
+          if (ok) go(site);
+          else if (done === total) fail();
+        });
       }
     });
+  }
+
+  WAVES.forEach(function (w) {
+    if (w === 0) wave(); else timers.push(setTimeout(wave, w));
   });
+  timers.push(setTimeout(showManual, SHOW_MANUAL_AFTER));
 }
 
-// اگه وسط کار اینترنت عوض شد (وای‌فای/دیتا/اپراتور)، از اول شروع کن
-function restart() {
-  if (redirected) return;
-  round = 0;
-  spinEl.style.display = "block";
-  statusEl.textContent = "در حال بررسی دوباره...";
-  race();
-}
-window.addEventListener("online", restart);
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden && !redirected && !running) restart();
-});
+// اگه وسط کار نت عوض شد (وای‌فای ↔ دیتا، همراه اول ↔ ایرانسل) از اول شروع کن
+function onNet() { if (!redirected) start(); }
+window.addEventListener("online", onNet);
 if (navigator.connection && navigator.connection.addEventListener) {
-  navigator.connection.addEventListener("change", restart);
+  navigator.connection.addEventListener("change", onNet);
 }
+// اگه صفحه توی پس‌زمینه بود و برگشتی، دوباره تست کن
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden && !redirected) start();
+});
 
-race();
+start();
 </script>
 </body>
 </html>
