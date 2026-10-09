@@ -1,32 +1,113 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>منو</title>
+<style>
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; min-height:100dvh;
+    display:grid; place-items:center; padding:24px;
+    background:#1a0f0a; color:#fff;
+    font-family:Tahoma,sans-serif; text-align:center;
+  }
+  .card{
+    width:100%; max-width:420px; padding:32px 24px;
+    background:rgba(255,255,255,.05);
+    border:1px solid rgba(254,123,1,.3);
+    border-radius:20px;
+  }
+  h1{font-size:20px; margin:8px 0; color:#ffd9b4}
+  .sub{font-size:13px; color:#a09080; margin:0 0 20px}
+  .spin{
+    width:36px; height:36px; margin:0 auto 14px;
+    border:4px solid rgba(255,255,255,.15);
+    border-top-color:#fe7b01; border-radius:50%;
+    animation:r 1s linear infinite;
+  }
+  @keyframes r{to{transform:rotate(360deg)}}
+  #status{font-size:14px; margin:0 0 10px}
+  #diag{font-size:11px; color:#a09080; margin:0 0 16px; direction:ltr; min-height:16px}
+  #links{display:none}
+  #links p{font-size:12px; color:#a09080; margin:16px 0 8px}
+  #links a{
+    display:block; padding:14px; margin:8px 0;
+    color:#ffd9b4; text-decoration:none; font-size:15px;
+    border:1px solid rgba(254,123,1,.4);
+    border-radius:12px; background:rgba(254,123,1,.08);
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div style="font-size:38px">☕</div>
+  <h1 id="cafeName"></h1>
+  <p class="sub">در حال پیدا کردن بهترین مسیر...</p>
+  <div class="spin" id="spin"></div>
+  <p id="status">لطفاً صبر کن</p>
+  <p id="diag"></p>
+
+  <div id="links">
+    <p>اگر خودکار باز نشد، اپراتورت رو انتخاب کن:</p>
+  </div>
+</div>
+
 <script>
+/* =====================================================
+   ✏️ فقط این قسمت رو تغییر بده
+   ===================================================== */
+
+// اسم کافه (اختیاری، روی سرعت اثری نداره)
 var CAFE_NAME = "";
 
+// لینک‌ها
 var SITES = [
   { name: "همراه اول", url: "https://www.menuc1.ir" },
   { name: "ایرانسل",   url: "https://menuc1.ir" }
 ];
 
-var PING_PATH = "/ping";          // اگه نداری "/" بذار
-var WAVES = [0, 1000, 2200, 3600]; // دورهای پینگ (ms)
-var TIMEOUT = 3000;                // حداکثر انتظار هر پینگ
-var HEAD_START = 300;              // امتیاز زمانی برای سایت برندهٔ دفعهٔ قبل
+// مسیر تست (اگه توی ورکر /ping ساختی بذار "/ping"، وگرنه "/")
+var PING_PATH = "/";
+
+// هر سایت در هر دور چند پینگ همزمان بگیره
+var PARALLEL = 2;
+
+// دورهای پینگ (میلی‌ثانیه بعد از شروع). اگه دور اول جواب نداد، دور بعد خودکار میاد
+var WAVES = [0, 1500, 3500];
+
+// اگه اولین جواب سریع‌تر از این بود، همون لحظه می‌ره (میلی‌ثانیه)
+var FAST_MS = 900;
+
+// اگه اولین جواب کند بود، این‌قدر صبر می‌کنه ببینه سایت دیگه بهتره یا نه
+var GRACE_MS = 700;
+
+// حداکثر انتظار هر پینگ
+var TIMEOUT = 5000;
+
+// بعد از چند میلی‌ثانیه دکمه‌های دستی نشون داده بشه
 var SHOW_MANUAL_AFTER = 3500;
+
+/* =====================================================
+   ⛔ از اینجا به پایین نیازی به تغییر نیست
+   ===================================================== */
 
 document.title = CAFE_NAME ? "منو | " + CAFE_NAME : "منو";
 document.getElementById("cafeName").textContent = CAFE_NAME;
 
 var extra = location.search + location.hash;
 var statusEl = document.getElementById("status");
+var diagEl = document.getElementById("diag");
 var linksEl = document.getElementById("links");
 var spinEl = document.getElementById("spin");
-var redirected = false, gen = 0, ctrls = [], timers = [];
+var redirected = false;
+var gen = 0, ctrls = [], timers = [], res = {}, failed = {};
 
-function base(s) { return s.url.replace(//+$/, ""); }
-function fullUrl(s) { return base(s) + "/" + extra; }
+function base(site) { return site.url.replace(/\/+$/, ""); }
+function fullUrl(site) { return base(site) + "/" + extra; }
 
-function lastWinner() { try { return localStorage.getItem("lastSite"); } catch (e) { return null; } }
-function saveWinner(s) { try { localStorage.setItem("lastSite", s.url); } catch (e) {} }
-
+// دکمه‌های دستی + تلاش دوباره
 SITES.forEach(function (site) {
   var a = document.createElement("a");
   a.href = fullUrl(site);
@@ -41,13 +122,28 @@ linksEl.appendChild(retry);
 
 function showManual() { if (!redirected) linksEl.style.display = "block"; }
 
+// وضعیت زندهٔ هر سایت (زمان پاسخ)
+function diag() {
+  var per = PARALLEL * WAVES.length;
+  diagEl.textContent = SITES.map(function (s, i) {
+    var v = res[i] != null ? Math.round(res[i]) + "ms" : ((failed[i] || 0) >= per ? "x" : "...");
+    return s.url.replace(/^https?:\/\//, "") + " " + v;
+  }).join("   ");
+}
+
 function go(site) {
   if (redirected) return;
   redirected = true;
-  saveWinner(site);
   stop();
   statusEl.textContent = "وصل شد ✓ " + site.name;
   location.replace(fullUrl(site));
+}
+
+function fail() {
+  if (redirected) return;
+  spinEl.style.display = "none";
+  statusEl.textContent = "اتصال خودکار برقرار نشد";
+  showManual();
 }
 
 function stop() {
@@ -56,50 +152,77 @@ function stop() {
   ctrls = []; timers = [];
 }
 
+// یک پینگ: به محض رسیدن هدر جواب، موفق حساب می‌شه (بدنه دانلود نمی‌شه)
 function ping(site, cb) {
   var ctrl = new AbortController();
   ctrls.push(ctrl);
+  var t0 = performance.now();
   var t = setTimeout(function () { ctrl.abort(); }, TIMEOUT);
   fetch(base(site) + PING_PATH + "?_t=" + Date.now() + Math.random().toString(36).slice(2, 6), {
-    method: "HEAD", mode: "no-cors", cache: "no-store", signal: ctrl.signal
+    method: "GET",
+    mode: "no-cors",
+    cache: "no-store",
+    priority: "high",
+    signal: ctrl.signal
   })
-  .then(function () { clearTimeout(t); cb(true); })
-  .catch(function () { clearTimeout(t); cb(false); });
+  .then(function () { clearTimeout(t); cb(true, performance.now() - t0); })
+  .catch(function () { clearTimeout(t); cb(false, 0); });
 }
 
+// هر بار که صدا زده بشه از صفر شروع می‌کنه
 function start() {
   stop();
   var g = ++gen;
-  var total = SITES.length * WAVES.length, done = 0;
-  var last = lastWinner();
+  var total = SITES.length * PARALLEL * WAVES.length, done = 0, grace = false;
+  res = {}; failed = {};
   spinEl.style.display = "";
   statusEl.textContent = "لطفاً صبر کن";
-  linksEl.style.display = "none";
+  diag();
 
-  function fire(site) {
+  function best() {
+    var bi = -1;
+    for (var i in res) if (bi < 0 || res[i] < res[bi]) bi = i;
+    return bi < 0 ? null : { i: +bi, ms: res[bi] };
+  }
+  function decide() {
+    var b = best();
+    if (!b) return;
+    var all = Object.keys(res).length === SITES.length;
+    if (b.ms <= FAST_MS || all) return go(SITES[b.i]);
+    if (!grace) {
+      grace = true;
+      timers.push(setTimeout(function () { var x = best(); if (x) go(SITES[x.i]); }, GRACE_MS));
+    }
+  }
+
+  function wave() {
     if (redirected || g !== gen) return;
-    ping(site, function (ok) {
-      if (g !== gen || redirected) return;
-      done++;
-      if (ok) go(site);
-      else if (done >= total) {
-        spinEl.style.display = "none";
-        statusEl.textContent = "اتصال خودکار برقرار نشد";
-        showManual();
+    SITES.forEach(function (site, idx) {
+      for (var k = 0; k < PARALLEL; k++) {
+        ping(site, function (ok, ms) {
+          if (g !== gen || redirected) return;
+          done++;
+          if (ok) {
+            if (res[idx] == null || ms < res[idx]) res[idx] = ms;
+            diag();
+            decide();
+          } else {
+            failed[idx] = (failed[idx] || 0) + 1;
+            diag();
+            if (done === total && !Object.keys(res).length) fail();
+          }
+        });
       }
     });
   }
 
   WAVES.forEach(function (w) {
-    SITES.forEach(function (site) {
-      var delay = w + (last && site.url !== last ? HEAD_START : 0);
-      if (delay === 0) fire(site);
-      else timers.push(setTimeout(function () { fire(site); }, delay));
-    });
+    if (w === 0) wave(); else timers.push(setTimeout(wave, w));
   });
   timers.push(setTimeout(showManual, SHOW_MANUAL_AFTER));
 }
 
+// اگه وسط کار نت عوض شد (سیم‌کارت یا وای‌فای) از اول شروع کن
 function onNet() { if (!redirected) start(); }
 window.addEventListener("online", onNet);
 if (navigator.connection && navigator.connection.addEventListener) {
@@ -108,6 +231,10 @@ if (navigator.connection && navigator.connection.addEventListener) {
 document.addEventListener("visibilitychange", function () {
   if (!document.hidden && !redirected) start();
 });
+// اگه مرورگر صفحه رو از حافظهٔ قبلی برگردوند (با وضعیت قدیمی)، تازه‌اش کن
+window.addEventListener("pageshow", function (e) { if (e.persisted) location.reload(); });
 
 start();
 </script>
+</body>
+</html>
